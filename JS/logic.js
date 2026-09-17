@@ -1,4 +1,3 @@
-
 /* ============================================================
    logic.js —— 游戏核心逻辑：结算、贪污、巡逻、事件
    ============================================================ */
@@ -666,3 +665,297 @@ function nextDay(){
           const victim = pick(others);
           victim.diseases.push({name:dz.name, days:rnd(DISEASES[dz.name].days[0],DISEASES[dz.name].days[1]), severity:dz.severity});
           importantLines.push({text:`🦠 <b>${victim.name}</b> 被传染${dz.name}！`, type:'warn'});
+        }
+      }
+    });
+  });
+  state.adventurers.forEach(adv=>{
+    if(adv.status==='昏迷'||adv.imprisoned>0) return;
+    if((adv.diseases||[]).length>=2) return;
+    let chance = .015;
+    if(adv.fatigue>70) chance += .06;
+    if(adv.fatigue>85) chance += .05;
+    if(adv.happiness<30) chance += .05;
+    if(state.res.食物===0) chance += .08;
+    if(adv.hp<calcMax(adv).hp*.4) chance += .04;
+    if(state.crime.level>50) chance += .03;
+    chance *= E.患病压制;
+    if(Math.random()<chance){
+      const names = Object.keys(DISEASES);
+      const weights = names.map(n=>DISEASES[n].severity===1?6:DISEASES[n].severity===2?3:1);
+      let total = weights.reduce((a,b)=>a+b,0);
+      let r = Math.random()*total;
+      let chosen = names[0];
+      for(let i=0;i<names.length;i++){ r -= weights[i]; if(r<=0){ chosen = names[i]; break; } }
+      const dz = DISEASES[chosen];
+      adv.diseases.push({name:chosen, days:rnd(dz.days[0],dz.days[1]), severity:dz.severity});
+      importantLines.push({text:`🤒 <b>${adv.name}</b> 染上<b>${chosen}</b>！`, type:'warn'});
+    }
+  });
+
+  /* ---- 犯罪 ---- */
+  let pressure = 0;
+  const hungryCount = state.res.食物===0 ? pop : 0;
+  const unhappyCount = state.adventurers.filter(a=>a.happiness<30).length;
+  const tiredCount = state.adventurers.filter(a=>a.fatigue>70).length;
+  const corruptCount = state.adventurers.filter(a=>a.corruptCount>0).length;
+  pressure += unhappyCount*2.5 + tiredCount*1.5 + hungryCount*4 + corruptCount*3;
+  pressure -= (state.buildings['治安所']||0)*2.5;
+  state.crime.level = clamp(state.crime.level + pressure*.35, 0, 100);
+  const crimeChance = state.crime.level/100 * .35;
+  if(state.adventurers.length>0 && Math.random()<crimeChance){
+    const candidates = state.adventurers.filter(a=>a.status!=='昏迷'&&a.imprisoned===0);
+    if(candidates.length){
+      candidates.sort((x,y)=>{
+        const sx = (100-x.happiness) + x.fatigue + (state.res.食物===0?30:0) + x.corruptCount*5;
+        const sy = (100-y.happiness) + y.fatigue + (state.res.食物===0?30:0) + y.corruptCount*5;
+        return sy-sx;
+      });
+      const criminal = candidates[0];
+      const richTargets = state.adventurers.filter(x=>x.id!==criminal.id && x.wallet>5);
+      const useTheft = richTargets.length>0 && Math.random()<.5;
+      state.crime.totalCrimes++;
+      state.crime.criminals++;
+      criminal.criminal = true;
+      criminal.crimeRecord = (criminal.crimeRecord||0)+1;
+      criminal.stats.crimes = (criminal.stats.crimes||0)+1;
+      if(useTheft){
+        richTargets.sort((x,y)=>y.wallet-x.wallet);
+        const victim = richTargets[0];
+        const steal = Math.round(Math.min(victim.wallet, rnd(3,10))*10)/10;
+        victim.wallet -= steal;
+        criminal.wallet += steal;
+        victim.happiness = clamp(victim.happiness-8,0,100);
+        importantLines.push({text:`🚨 <b>${criminal.name}</b> 偷了 <b>${victim.name}</b> ${steal} 金币。`, type:'bad'});
+      } else {
+        const types = ['偷窃营地资源','破坏营地','斗殴伤人','走私货品'];
+        const crime = pick(types);
+        if(crime==='偷窃营地资源'){
+          const steal = {};
+          for(const r of Object.keys(state.res)){
+            if(state.res[r]>0){ const amt = Math.min(state.res[r], rnd(2,8)); state.res[r]-=amt; steal[r]=amt; }
+          }
+          const gold = Object.values(steal).reduce((a,b)=>a+b,0)*2;
+          criminal.wallet += gold;
+          importantLines.push({text:`🚨 <b>${criminal.name}</b> 偷窃营地资源，转卖 ${gold} 金币。`, type:'bad'});
+        } else if(crime==='破坏营地'){
+          if(state.project){
+            const dmg = rnd(3,10);
+            state.project.progress = Math.max(0, state.project.progress-dmg);
+            importantLines.push({text:`🚨 <b>${criminal.name}</b> 破坏工程（-${dmg}）。`, type:'bad'});
+          }
+        } else if(crime==='斗殴伤人'){
+          const others = state.adventurers.filter(x=>x.id!==criminal.id && x.status!=='昏迷');
+          if(others.length){
+            const victim = pick(others);
+            const dmg = rnd(2,6);
+            victim.hp = Math.max(0, victim.hp-dmg);
+            if(victim.hp<=0){ victim.status='昏迷'; victim.task='休息'; victim.stats.downed++; }
+            importantLines.push({text:`🚨 <b>${criminal.name}</b> 打伤 <b>${victim.name}</b>（-${dmg}）。`, type:'bad'});
+          }
+        } else {
+          const amt = rnd(5,15);
+          state.res.金币 = Math.max(0, state.res.金币-amt);
+          criminal.wallet += amt;
+          importantLines.push({text:`🚨 <b>${criminal.name}</b> 走私，营地金币 -${amt}。`, type:'bad'});
+        }
+      }
+      const hasGuard = (state.buildings['治安所']||0)>0;
+      const patrolCoverage = state.adventurers.filter(x=>x.task==='巡逻'&&x.imprisoned===0).length;
+      const catchChance = (hasGuard?.5:0) + Math.min(.5, patrolCoverage*.25);
+      if(Math.random()<catchChance){
+        if(criminal.crimeRecord>=3){
+          importantLines.push({text:`⚖ <b>${criminal.name}</b> 屡犯，驱逐出据点！`, type:'bad'});
+          state.adventurers = state.adventurers.filter(x=>x.id!==criminal.id);
+        } else {
+          criminal.imprisoned = rnd(2,4);
+          criminal.task = '休息';
+          importantLines.push({text:`⚖ <b>${criminal.name}</b> 被捕，监禁 ${criminal.imprisoned} 天。`, type:'bad'});
+        }
+      } else {
+        importantLines.push({text:`⚖ 据点治安不足，<b>${criminal.name}</b> 未落网。`, type:'warn'});
+      }
+    }
+  }
+  state.crime.level = clamp(state.crime.level-2, 0, 100);
+
+  /* ---- 食物：先记录收获，再从仓库扣消耗 ---- */
+  // ★ 修复：让玩家看到狩猎/耕作/垂钓的产出
+  if(gain.食物 > 0){
+    addLog(`🌾 今日收获食物 +${gain.食物}。`, 'good');
+  }
+  if(pop>0){
+    let need = 0;
+    state.adventurers.forEach(adv=>{ need += raceFoodCost(adv); });
+    need = Math.max(0, need - E.食物减免);
+    if(state.res.食物 >= need){
+      state.res.食物 -= need;
+      addLog(`🍖 全员消耗食物 ${need} 单位${E.食物减免?`（建筑减免 ${E.食物减免}）`:''}。`, '');
+    } else {
+      const shortage = need - state.res.食物;
+      state.res.食物 = 0;
+      importantLines.push({text:`🚨 食物短缺！缺口 ${shortage}，全员挨饿。`, type:'bad'});
+      state.adventurers.forEach(adv=>{
+        const hpL = rnd(2,5), mindL = rnd(1,3);
+        adv.hp = Math.max(0, adv.hp-hpL);
+        adv.mind = Math.max(0, adv.mind-mindL);
+        adv.happiness = clamp(adv.happiness-8,0,100);
+        if(adv.hp<=0 && adv.status!=='昏迷'){ adv.status='昏迷'; adv.task='休息'; adv.stats.downed++; }
+      });
+    }
+  }
+
+  /* ---- 入库（除食物之外，其余直接入库；食物已在消耗前入账） ---- */
+  Object.keys(gain).forEach(k=>{
+    if(k==='食物') return; // 食物已在消耗前由日志与扣减处理
+    if(gain[k]>0){
+      state.res[k] = (state.res[k]||0) + gain[k];
+      state.totals.produced[k] = (state.totals.produced[k]||0) + gain[k];
+    }
+  });
+  // 食物也入账到累计产出
+  if(gain.食物 > 0){
+    state.totals.produced['食物'] = (state.totals.produced['食物']||0) + gain.食物;
+  }
+
+  /* ---- 幸福演变 ---- */
+  const bedCount = E.床位;
+  state.adventurers.forEach(adv=>{
+    if(adv.status==='昏迷'){ adv.happiness = clamp(adv.happiness-1,0,100); return; }
+    if(adv.imprisoned>0){ adv.happiness = clamp(adv.happiness-3,0,100); return; }
+    let delta = 0;
+    if(bedCount>=pop) delta += 5 + (state.buildings['住房']||0);
+    else delta -= 12;
+    if(state.res.食物>pop*4) delta += 4;
+    else if(state.res.食物>pop*1.5) delta += 1;
+    else if(state.res.食物===0) delta -= 8;
+    if(adv.fatigue>85) delta -= 2;
+    else if(adv.fatigue>70) delta -= 1;
+    delta -= Math.min(2, Math.floor(adv.consecutiveWork/8));
+    delta += Math.round(E.幸福度/Math.max(1,pop));
+    if((adv.diseases||[]).length>0) delta -= (adv.diseases.length*2);
+    if(adv.criminal) delta -= 2;
+    if(adv.wallet>=30) delta += 1;
+    if(adv.wallet>=80) delta += 1;
+    if(adv.wallet>=10 && state.res.食物>pop*2) delta += 1;
+    adv.happiness = clamp(adv.happiness+delta,0,100);
+    if(adv.happiness<15){
+      adv.lowHappyDays++;
+      if(adv.lowHappyDays>=3 && pop>1){
+        importantLines.push({text:`😡 <b>${adv.name}</b> 幸福过低，离据点而去！`, type:'bad'});
+        adv._leave = true;
+      }
+    } else adv.lowHappyDays = 0;
+  });
+  const leavers = state.adventurers.filter(a=>a._leave);
+  if(leavers.length){
+    state.adventurers = state.adventurers.filter(a=>!a._leave);
+    leavers.forEach(a=>delete a._leave);
+  }
+
+  /* ---- 夜袭 ---- */
+  const raidChance = .28 * E.夜袭倍率;
+  if(state.adventurers.length>0 && Math.random()<raidChance){
+    const awake = state.adventurers.filter(a=>a.status!=='昏迷' && a.imprisoned===0);
+    if(awake.length){
+      const victim = pick(awake);
+      const dmg = Math.max(1, Math.round(rnd(3,10)*E.受伤倍率));
+      victim.hp = Math.max(0, victim.hp-dmg);
+      victim.mind = Math.max(0, victim.mind-rnd(1,5));
+      victim.happiness = clamp(victim.happiness-4,0,100);
+      victim.stats.injured += dmg;
+      state.totals.injured += dmg;
+      if(victim.hp<=0){ victim.status='昏迷'; victim.task='休息'; victim.stats.downed++; }
+      importantLines.push({text:`🧟 亡灵夜袭！<b>${victim.name}</b> 受伤 ${dmg}。`, type:'bad'});
+    }
+  }
+
+  /* ---- 随机事件 ---- */
+  const evs = [];
+  if(Math.random()<.28){
+    const pool = [];
+    EVENTS.forEach(e=>{ for(let i=0;i<e.weight;i++) pool.push(e); });
+    if(pool.length) evs.push(pick(pool));
+  }
+
+  /* ---- 写日志 ---- */
+  state.day++;
+  addLog(`—— 第 ${state.day} 天 ——`, 'day');
+  if(summary.rest.length){
+    const tHp = summary.rest.reduce((a,b)=>a+b.hp,0);
+    const tMind = summary.rest.reduce((a,b)=>a+b.mind,0);
+    const tHappy = summary.rest.reduce((a,b)=>a+b.happy,0);
+    addLog(`🛏 ${summary.rest.length} 名冒险者休息，共恢复 ${tHp} 生命 · ${tMind} 心理 · ${tHappy} 幸福。`, 'good');
+  }
+  const workEntries = Object.entries(summary.work).filter(([k])=>k!=='闲着');
+  if(workEntries.length){
+    const txt = workEntries.map(([k,v])=>`${TASKS[k].icon}${k}×${v.count}${v.total>0?`(+${v.total})`:''}`).join(' · ');
+    addLog(`⚙ 今日劳作：${txt}`, '');
+  }
+  if(summary.build>0) addLog(`🔨 施工进度 +${summary.build}。`, '');
+  if(summary.entertain>0) addLog(`🎭 娱乐表演，全队幸福 +${summary.entertain}。`, 'good');
+  const gainTxt = Object.entries(gain).filter(([k,v])=>v>0).map(([k,v])=>{
+    const icon = (RES_META.find(m=>m.k===k)||{}).i||'';
+    return `${icon}${k}+${v}`;
+  }).join(' ');
+  if(gainTxt) addLog(`📦 今日入库：${gainTxt}`, '');
+  importantLines.slice().reverse().forEach(l=>addLog(l.text, l.type));
+
+  checkGoals();
+  checkEndings();
+
+  pendingEvents = evs;
+  renderNow();
+  save();
+
+  if(pendingEvents.length) setTimeout(()=>showNextEvent(), 200);
+}
+
+/* ---------- 目标 / 结局 ---------- */
+function checkGoals(){
+  if(!state.goalDone) state.goalDone = {};
+  GOALS.forEach(g=>{
+    if(state.goalDone[g.id]) return;
+    if(g.check(state)){
+      state.goalDone[g.id] = true;
+      addLog(`🏅 达成目标：<b>${g.name}</b> —— ${g.desc}`, 'epic');
+      if(g.reward){
+        for(const [r,v] of Object.entries(g.reward)) state.res[r] = (state.res[r]||0) + v;
+        const rewardTxt = Object.entries(g.reward).map(([k,v])=>`${k}+${v}`).join(' ');
+        addLog(`🎁 奖励：${rewardTxt}`, 'good');
+      }
+    }
+  });
+}
+function checkEndings(){
+  const pop = state.adventurers.length;
+  if(pop===0 && state.day>5 && !endingsShown.defeat){
+    endingsShown.defeat = true;
+    showEnding('defeat', '据点离散', '所有冒险者都已离开或倒下，据点成为废墟。');
+    return;
+  }
+  const pros = prosperity();
+  if(pros>=100 && !endingsShown.victory){
+    endingsShown.victory = true;
+    showEnding('victory', '繁荣的据点', `经过 ${state.day} 天的经营，你的据点繁荣度达到 ${Math.round(pros)}，成为主世界边陲的一个小中心。`);
+  }
+}
+function showEnding(type, title, body){
+  $('#endTitle').textContent = type==='victory' ? '🏆 ' + title : '💀 ' + title;
+  $('#endTitle').style.color = type==='victory' ? '#6ab04c' : '#d9534f';
+  const pop = state.adventurers.length;
+  const bld = Object.keys(state.buildings).length;
+  const avgHappy = pop ? Math.round(state.adventurers.reduce((a,b)=>a+b.happiness,0)/pop) : 0;
+  $('#endBody').innerHTML = `
+    <p style="font-size:14px;line-height:1.8;color:#c8d2de;">${body}</p>
+    <div class="stat-summary" style="margin-top:14px;">
+      <div><span>存活天数</span><b>${state.day}</b></div>
+      <div><span>人口</span><b>${pop}</b></div>
+      <div><span>建筑数</span><b>${bld}</b></div>
+      <div><span>平均幸福</span><b>${avgHappy}</b></div>
+      <div><span>累计工资</span><b>${Math.round(state.totals.wages||0)}</b></div>
+      <div><span>繁荣度</span><b>${Math.round(prosperity())}</b></div>
+    </div>
+  `;
+  $('#endMask').classList.add('on');
+}
