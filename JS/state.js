@@ -2,13 +2,13 @@
    state.js —— 全局状态、存档、迁移、工资、繁荣度
    ============================================================ */
 
-let state = null;
-let editingId = null;
-let listenersBound = false;
-let currentLogFilter = 'all';
-let currentSort = 'default';
-let pendingEvents = [];
-let endingsShown = { victory:false, defeat:false };
+var state = state || null;
+var editingId = editingId || null;
+var listenersBound = listenersBound || false;
+var currentLogFilter = currentLogFilter || 'all';
+var currentSort = currentSort || 'default';
+var pendingEvents = pendingEvents || [];
+var endingsShown = endingsShown || { victory:false, defeat:false };
 
 function defaultState(){
   return {
