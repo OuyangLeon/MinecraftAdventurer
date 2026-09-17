@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MC冒险者模拟器</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>MC冒险者模拟器<small>Minecraft: Arcane Age —— 据点经营者</small></h1>
+    <div class="res-bar" id="resBar"></div>
+  </header>
+
+  <div class="toolbar">
+    <span class="tag camp-name" id="campNameTag" title="点击修改营地名称">🏕 无名营地 ✏</span>
+    <button id="btnRecruit" class="primary">＋ 招募（30🪙）</button>
+    <span class="spacer"></span>
+    <span class="tag" id="popTag"></span>
+    <span class="tag" id="wageTag"></span>
+    <span class="tag" id="crimeTag"></span>
+    <span class="tag" id="joyTag"></span>
+    <span class="tag" id="netTag"><span class="net-badge off"></span>离线</span>
+    <button id="btnCamps" class="teal">🌐 所有营地</button>
+    <button id="btnGoals" class="blue">🎯 目标</button>
+    <button id="btnStats">📊 统计</button>
+    <button id="btnCamp">🏕 加成</button>
+    <button id="btnExport">⬇ 导出</button>
+    <button id="btnImport">⬆ 导入</button>
+    <input type="file" id="fileInput" accept=".json,application/json" hidden>
+    <button id="btnReset" class="danger">重置</button>
+  </div>
+
+  <main>
+    <section class="panel">
+      <div class="panel-head">
+        <h2>⚔ 冒险者名册</h2>
+        <div class="sort-bar">
+          <span class="hint" id="advSummary"></span>
+          <select id="sortBy">
+            <option value="default">默认顺序</option>
+            <option value="happy-asc">幸福 ↑</option>
+            <option value="happy-desc">幸福 ↓</option>
+            <option value="fatigue-desc">疲劳 ↓</option>
+            <option value="hp-asc">生命 ↑</option>
+            <option value="task">按任务</option>
+            <option value="name">按名字</option>
+          </select>
+          <button id="btnRestAll" style="padding:2px 6px;font-size:11px;">全部休息</button>
+          <button id="btnBuildAll" style="padding:2px 6px;font-size:11px;">全部建造</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="advList"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>📜 据点日志</h2>
+        <div class="log-filter" id="logFilter">
+          <button data-f="all" class="active">全部</button>
+          <button data-f="important">重要</button>
+          <button data-f="combat">战斗</button>
+          <button data-f="econ">经济</button>
+        </div>
+      </div>
+      <div class="panel-body" style="padding:0;">
+        <div id="logList"></div>
+        <div style="padding:10px;border-top:2px solid var(--line);background:var(--panel2);">
+          <button class="primary" id="btnNext" style="width:100%;padding:9px;font-size:14px;letter-spacing:2px;">☀ 结算一天</button>
+          <div class="hint">月薪每 30 天发放一次。巡逻有机会查获贪污并追赃。</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="panel" id="goalPanel">
+    <div class="panel-head">
+      <h2>🎯 阶段目标</h2>
+      <span class="hint" id="prosperTag"></span>
+    </div>
+    <div class="panel-body">
+      <div class="goal-list" id="goalList"></div>
+    </div>
+  </section>
+
+  <section class="panel" id="campsitePanel">
+    <div class="panel-head">
+      <h2>🏕 营地建设</h2>
+      <span class="hint">多工人同时施工可加速；点击建筑卡片开工或升级</span>
+    </div>
+    <div class="panel-body">
+      <div class="joy-panel">
+        <span style="font-size:22px;">🔥</span>
+        <div class="info" id="joyInfo"></div>
+        <button class="fire" id="btnFeast">🎊 篝火晚会</button>
+      </div>
+      <div class="wage-panel">
+        <div class="wage-row">
+          <label>💰 月薪等级：</label>
+          <input type="range" id="wageSlider" min="0" max="3" step="1" value="2">
+          <b id="wageLabel">标准</b>
+          <span id="wageDetail" style="color:var(--dim);"></span>
+        </div>
+      </div>
+      <div class="camp-overview" id="campOverview"></div>
+      <div id="projectBar"></div>
+      <div id="buildingGrid"></div>
+    </div>
+  </section>
+
+  <footer>基于《我的世界：奥术时代 TRPG》设定的经营模拟 · 数据保存在本地浏览器 · 营地状态共享于社区</footer>
+</div>
+
+<!-- 招募/编辑弹窗 -->
+<div class="mask" id="mask">
+  <div class="modal">
+    <div class="modal-head" id="modalTitle">招募冒险者</div>
+    <div class="modal-body">
+      <div class="row2">
+        <div class="field"><label>姓名</label><input id="f-name" type="text" placeholder="输入姓名" maxlength="12"></div>
+        <div class="field"><label>奥术道路</label><select id="f-path"></select></div>
+      </div>
+      <div class="field"><label>种族</label><select id="f-race"></select><div class="desc" id="raceDesc"></div></div>
+      <div class="field">
+        <label>基础属性（单项 ≤ 18）</label>
+        <div class="attr-grid" id="attrGrid"></div>
+        <div style="margin-top:8px;display:flex;gap:8px;">
+          <button id="btnRoll">🎲 掷骰</button>
+          <button id="btnPointBuy">📐 购点(96)</button>
+        </div>
+      </div>
+      <div class="preview" id="preview"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="danger" id="btnCancel">取消</button>
+      <button class="primary" id="btnSave">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 统计弹窗 -->
+<div class="mask" id="statsMask">
+  <div class="modal wide">
+    <div class="modal-head">📊 冒险者统计</div>
+    <div class="modal-body" id="statsBody"></div>
+    <div class="modal-foot">
+      <span class="hint">「初始」为招募时属性，「当前」含劳作成长，不含种族修正。</span>
+      <button class="primary" id="btnStatsClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 目标弹窗 -->
+<div class="mask" id="goalsMask">
+  <div class="modal wide">
+    <div class="modal-head">🎯 目标与结局</div>
+    <div class="modal-body" id="goalsBody"></div>
+    <div class="modal-foot">
+      <span class="hint">达成结局后仍可继续沙盒模式。</span>
+      <button class="primary" id="btnGoalsClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 营地加成弹窗 -->
+<div class="mask" id="campMask">
+  <div class="modal">
+    <div class="modal-head">🏕 营地总加成</div>
+    <div class="modal-body" id="campBody"></div>
+    <div class="modal-foot">
+      <span class="hint">所有已建造建筑的累计效果。</span>
+      <button class="primary" id="btnCampClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 事件弹窗 -->
+<div class="mask" id="eventMask">
+  <div class="modal">
+    <div class="modal-head" id="eventTitle">事件</div>
+    <div class="modal-body">
+      <div class="event-desc" id="eventDesc"></div>
+      <div class="event-choice" id="eventChoices"></div>
+    </div>
+  </div>
+</div>
+
+<!-- 结局弹窗 -->
+<div class="mask" id="endMask">
+  <div class="modal">
+    <div class="modal-head" id="endTitle">结局</div>
+    <div class="modal-body" id="endBody"></div>
+    <div class="modal-foot">
+      <button class="primary" id="btnEndContinue">继续沙盒</button>
+      <button class="danger" id="btnEndRestart">重新开始</button>
+    </div>
+  </div>
+</div>
+
+<!-- 营地名称编辑弹窗 -->
+<div class="mask" id="nameMask">
+  <div class="modal">
+    <div class="modal-head">🏕 修改营地名称</div>
+    <div class="modal-body">
+      <div class="field">
+        <label>营地名称（1-16 字符）</label>
+        <input id="inpCampName" type="text" maxlength="16" placeholder="给你的据点起个名字">
+      </div>
+      <div class="hint">营地名称会显示在共享列表中，所有玩家可见。</div>
+    </div>
+    <div class="modal-foot">
+      <button class="danger" id="btnNameCancel">取消</button>
+      <button class="primary" id="btnNameSave">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 所有营地弹窗 -->
+<div class="mask" id="campListMask">
+  <div class="modal wide">
+    <div class="modal-head">🌐 所有营地（共享注册表）</div>
+    <div class="modal-body" id="campListBody"></div>
+    <div class="modal-foot">
+      <span class="hint">数据由所有玩家共同上传，可能有延迟。</span>
+      <button class="primary" id="btnCampListClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 脚本加载顺序很重要 ============ -->
+<script src="js/data.js"></script>
+<script src="js/utils.js"></script>
+<script src="js/cache.js"></script>
+<script src="js/state.js"></script>
+<script src="js/shared.js"></script>
+<script src="js/render.js"></script>
+<script src="js/logic.js"></script>
+<script src="js/modals.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
