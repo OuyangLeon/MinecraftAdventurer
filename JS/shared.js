@@ -1,216 +1,205 @@
 /* ============================================================
-   state.js —— 全局状态、存档、迁移、工资、繁荣度
+   shared.js —— 共享注册表（网络同步营地列表）
+   ★ 使用 IIFE 包裹，避免向全局泄漏变量导致重复声明
    ============================================================ */
+(function () {
+  'use strict';
 
-let state = null;
-let editingId = null;
-let listenersBound = false;
-let currentLogFilter = 'all';
-let currentSort = 'default';
-let pendingEvents = [];
-let endingsShown = { victory:false, defeat:false };
+  /* 确保 state / SHARED / REGISTRY_KEY 已从其他模块加载 */
+  if (typeof SHARED === 'undefined' || typeof REGISTRY_KEY === 'undefined') {
+    console.error('[shared.js] 缺少 data.js 中的 SHARED 或 REGISTRY_KEY 定义，请检查加载顺序');
+    return;
+  }
 
-function defaultState(){
-  return {
-    day:1,
-    res:{食物:40, 木材:20, 石头:10, 铁:0, 金币:80, 绿宝石:0},
-    adventurers:[],
-    buildings:{},
-    project:null,
-    log:[],
-    totals:{produced:{}, injured:0, worked:0, events:0, wages:0, corrupt:0, feasts:0},
-    crime:{level:0, totalCrimes:0, criminals:0},
-    wageTier:2,
-    feast:{cooldown:0, lastDay:-99, bonusDays:0},
-    flags:{tradeRoute:false},
-    goalDone:{},
-    campName:'',
-    campId:''
-  };
-}
+  async function ensureRegistryId() {
+    let id = null;
+    try {
+      const urlId = new URLSearchParams(location.search).get('reg');
+      if (urlId) { id = urlId; localStorage.setItem(REGISTRY_KEY, id); }
+    } catch (e) { /* ignore */ }
+    if (!id) id = localStorage.getItem(REGISTRY_KEY);
+    if (!id && SHARED.registryId) id = SHARED.registryId;
+    if (id) return id;
 
-function newAdventurer(name,race,path,base){
-  const adv = {
-    id:'a'+Date.now().toString(36)+Math.random().toString(36).slice(2,6),
-    name,race,path,
-    baseAttrs:Object.assign({},base),
-    initialAttrs:Object.assign({},base),
-    task:'休息',status:'正常',workDays:0,
-    taskCount:{}, profCount:{},
-    stats:{worked:0,injured:0,mental:0,produced:{},downed:0,healed:0,
-           cured:0,crimes:0,wageEarned:0,corruption:0,entertaining:0,
-           stolen:0,lost:0,spent:0,feastHappy:0,passiveHappy:0,recovered:0},
-    hp:0,mind:0,happiness:60,fatigue:0,
-    consecutiveWork:0,
-    profession:null,
-    lowHappyDays:0,
-    diseases:[],criminal:false,imprisoned:0,crimeRecord:0,
-    wallet:0,inventory:[],integrity:60,corruptCount:0,
-    corruptionHistory:[]
-  };
-  const m = calcMax(adv);
-  adv.hp = m.hp; adv.mind = m.mind;
-  return adv;
-}
+    try {
+      const r = await fetch(SHARED.createUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ camps: {}, version: 1, lastUpdated: Date.now() })
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const j = await r.json();
+      id = j.id || (j.uri && j.uri.split('/').pop());
+      if (id) {
+        localStorage.setItem(REGISTRY_KEY, id);
+        console.log('[共享注册表] 已创建新 ID:', id);
+      }
+      return id;
+    } catch (e) {
+      console.warn('[共享注册表] 创建失败，仅本地模式', e);
+      return null;
+    }
+  }
 
-/* ---------- 工资 ---------- */
-function baseMonthlyWage(adv){ const p = PATHS[adv.path] || {wage:0}; return 8 + (p.wage||0)*2; }
-function monthlyWage(adv){ const tier = WAGE_TIERS[state.wageTier] || WAGE_TIERS[2]; return Math.round(baseMonthlyWage(adv)*tier.mul*10)/10; }
-function totalMonthlyWage(){ return state.adventurers.reduce((s,a)=>s+monthlyWage(a),0); }
-function daysToPayday(){ return (WAGE_PERIOD - (state.day % WAGE_PERIOD)) % WAGE_PERIOD; }
+  async function fetchRegistry() {
+    const id = await ensureRegistryId();
+    if (!id) return null;
+    try {
+      const r = await fetch(SHARED.baseUrl + id, { cache: 'no-store' });
+      if (!r.ok) { SHARED._netOk = false; return null; }
+      SHARED._netOk = true;
+      return await r.json();
+    } catch (e) {
+      SHARED._netOk = false;
+      return null;
+    }
+  }
 
-/* ---------- 繁荣度 ---------- */
-function prosperity(){
-  if(!state.adventurers.length) return 0;
-  const pop = state.adventurers.length;
-  const bld = Object.keys(state.buildings).length;
-  const avgHappy = state.adventurers.reduce((a,b)=>a+b.happiness,0)/pop;
-  const crime = state.crime.level;
-  let score = pop*3 + bld*3 + (avgHappy-30)/2 + (100-crime)/5;
-  return clamp(score,0,150);
-}
+  async function pushRegistry(reg) {
+    const id = await ensureRegistryId();
+    if (!id) return false;
+    try {
+      const r = await fetch(SHARED.baseUrl + id, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(reg)
+      });
+      SHARED._netOk = r.ok;
+      return r.ok;
+    } catch (e) {
+      SHARED._netOk = false;
+      return false;
+    }
+  }
 
-/* ---------- 数据校验（修复工期 NaN） ---------- */
-function validateState(){
-  if(!state) return;
-  if(state.project){
-    if(!state.project.key || !BUILDINGS[state.project.key]){
-      state.project = null;
+  function myCampEntry() {
+    const st = window.state;
+    const pop = st.adventurers.length;
+    const avgHappy = pop ? Math.round(st.adventurers.reduce((s, a) => s + a.happiness, 0) / pop) : 0;
+    const avgIntegrity = pop ? Math.round(st.adventurers.reduce((s, a) => s + a.integrity, 0) / pop) : 0;
+    return {
+      id: st.campId,
+      name: st.campName,
+      day: st.day,
+      population: pop,
+      buildings: Object.keys(st.buildings).length,
+      prosperity: Math.round(window.prosperity()),
+      avgHappiness: avgHappy,
+      avgIntegrity: avgIntegrity,
+      crimeLevel: Math.round(st.crime.level),
+      gold: st.res.金币,
+      updated: Date.now()
+    };
+  }
+
+  async function publishMyCamp(force) {
+    if (!SHARED.enabled) return;
+    if (SHARED._uploading) return;
+    const now = Date.now();
+    if (!force && now - SHARED._lastUpload < SHARED.uploadThrottle) return;
+    SHARED._uploading = true;
+    try {
+      for (let i = 0; i < 3; i++) {
+        const reg = await fetchRegistry() || { camps: {}, version: 1, lastUpdated: now };
+        if (!reg.camps) reg.camps = {};
+        reg.camps[window.state.campId] = myCampEntry();
+        reg.lastUpdated = now;
+        const ok = await pushRegistry(reg);
+        if (ok) { SHARED._lastUpload = now; SHARED._netOk = true; updateNetTag(); return; }
+        await new Promise(r => setTimeout(r, 400 + i * 400));
+      }
+    } finally {
+      SHARED._uploading = false;
+      updateNetTag();
+    }
+  }
+
+  function updateNetTag() {
+    const t = document.getElementById('netTag');
+    if (!t) return;
+    if (SHARED._netOk) {
+      t.innerHTML = '<span class="net-badge on"></span>在线共享';
+      t.className = 'tag net-ok';
     } else {
-      if(typeof state.project.targetLevel !== 'number' || !isFinite(state.project.targetLevel) || state.project.targetLevel < 1){
-        state.project.targetLevel = (state.buildings[state.project.key]||0) + 1;
-      }
-      if(typeof state.project.required !== 'number' || isNaN(state.project.required) || !isFinite(state.project.required) || state.project.required <= 0){
-        state.project.required = buildingWork(state.project.key, state.project.targetLevel);
-      }
-      if(typeof state.project.progress !== 'number' || isNaN(state.project.progress) || !isFinite(state.project.progress)){
-        state.project.progress = 0;
-      }
-      if(state.project.progress < 0) state.project.progress = 0;
+      t.innerHTML = '<span class="net-badge off"></span>离线';
+      t.className = 'tag net-bad';
     }
   }
-  state.adventurers.forEach(adv => {
-    if(!Array.isArray(adv.corruptionHistory)) adv.corruptionHistory = [];
-  });
-}
 
-/* ---------- 迁移旧存档 ---------- */
-function migrate(raw){
-  const base = defaultState();
-  const s = Object.assign({}, base, raw);
-  s.res = Object.assign({}, base.res, raw.res||{});
+  async function showCampList() {
+    const mask = document.getElementById('campListMask');
+    const body = document.getElementById('campListBody');
+    if (!mask || !body) { console.error('找不到 campListMask/campListBody'); return; }
+    body.innerHTML = '<div style="text-align:center;padding:24px;color:#8892a0;">正在加载营地列表...</div>';
+    mask.classList.add('on');
 
-  const ob = raw.buildings || {};
-  s.buildings = {};
-  for(const [k,v] of Object.entries(ob)){
-    if(!BUILDINGS[k]) continue;
-    if(v===true) s.buildings[k] = 1;
-    else if(typeof v==='number' && v>0) s.buildings[k] = Math.min(5, Math.floor(v));
-  }
-
-  s.project = raw.project || null;
-  if(s.project){
-    if(!s.project.targetLevel) s.project.targetLevel = (s.buildings[s.project.key]||0)+1;
-    if(!s.project.required || typeof s.project.required !== 'number' || isNaN(s.project.required) || !isFinite(s.project.required) || s.project.required <= 0){
-      s.project.required = buildingWork(s.project.key, s.project.targetLevel);
+    const reg = await fetchRegistry();
+    if (!reg) {
+      body.innerHTML = '<div style="text-align:center;padding:24px;color:#d9534f;">无法连接到共享注册表。<div style="font-size:12px;color:#8892a0;margin-top:8px;">请检查网络后重试。</div></div>';
+      updateNetTag();
+      return;
     }
-    if(typeof s.project.progress!=='number' || isNaN(s.project.progress)) s.project.progress = 0;
-  }
+    updateNetTag();
 
-  s.log = raw.log || [];
-  s.totals = Object.assign({produced:{}, injured:0, worked:0, events:0, wages:0, corrupt:0, feasts:0}, raw.totals||{});
-  s.totals.produced = (raw.totals && raw.totals.produced) || {};
-  s.crime = Object.assign({level:0, totalCrimes:0, criminals:0}, raw.crime||{});
-  s.wageTier = typeof raw.wageTier==='number' ? clamp(raw.wageTier,0,3) : 2;
+    const camps = Object.values(reg.camps || {}).sort((a, b) => (b.prosperity || 0) - (a.prosperity || 0) || b.updated - a.updated);
+    if (!camps.length) {
+      body.innerHTML = '<div style="text-align:center;padding:24px;color:#8892a0;">还没有营地被分享。<br>结算一天即可自动上传你的营地。</div>';
+      return;
+    }
 
-  s.feast = Object.assign({cooldown:0, lastDay:-99, bonusDays:0}, raw.feast||{});
-  if(typeof s.feast.cooldown!=='number' || isNaN(s.feast.cooldown)) s.feast.cooldown = 0;
-  if(typeof s.feast.bonusDays!=='number' || isNaN(s.feast.bonusDays)) s.feast.bonusDays = 0;
-  if(typeof s.feast.lastDay!=='number') s.feast.lastDay = -99;
+    const me = window.state.campId;
+    const regId = localStorage.getItem(REGISTRY_KEY) || '';
+    const shareUrl = regId ? (location.origin + location.pathname + '?reg=' + regId) : location.href;
 
-  s.flags = Object.assign({tradeRoute:false}, raw.flags||{});
-  s.goalDone = Object.assign({}, raw.goalDone||{});
+    body.innerHTML = `
+      <div style="font-size:12.5px;color:#8892a0;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+        <span>共 <b style="color:#e8b93b;">${camps.length}</b> 个营地</span>
+        <span>· 你的营地 ID：<code style="color:#4ec9b0;">${me}</code></span>
+        <button id="btnCopyReg" style="padding:2px 8px;font-size:11px;margin-left:auto;">复制分享链接</button>
+        <button id="btnRefreshList" style="padding:2px 8px;font-size:11px;">刷新</button>
+      </div>
+      <div class="camplist">
+        ${camps.map(c => `
+          <div class="camp-card ${c.id === me ? 'mine' : ''}">
+            <div class="cname">
+              <span>${window.escapeHtml(c.name || '无名营地')}</span>
+              ${c.id === me ? '<small>（我的）</small>' : ''}
+            </div>
+            <div class="cgrid">
+              <span>📅 第 <b>${c.day || 0}</b> 天</span>
+              <span>👥 <b>${c.population || 0}</b> 人</span>
+              <span>🏛 <b>${c.buildings || 0}</b> 建筑</span>
+              <span>🌱 <b>${c.prosperity || 0}</b> 繁荣</span>
+              <span>😊 <b>${c.avgHappiness || 0}</b> 幸福</span>
+              <span>⚖ <b>${100 - (c.crimeLevel || 0)}</b> 治安</span>
+              <span>💰 <b>${c.gold || 0}</b> 金币</span>
+              <span>🛡 <b>${c.avgIntegrity || 0}</b> 诚信</span>
+            </div>
+            <div class="ctime">${window.timeAgo(c.updated)} 更新</div>
+          </div>
+        `).join('')}
+      </div>
+    `;
 
-  if(!s.campName) s.campName = pick(['翠','金','石','铁','木','水','火','风','雷','霜'])+'石营地';
-  if(!s.campId) s.campId = 'camp_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-
-  s.adventurers = (raw.adventurers || []).map(a=>{
-    const adv = Object.assign({
-      task:'休息', status:'正常', workDays:0,
-      baseAttrs:{}, stats:{}, taskCount:{}, profCount:{},
-      happiness:60, fatigue:0, consecutiveWork:0,
-      profession:null, lowHappyDays:0,
-      diseases:[], criminal:false, imprisoned:0, crimeRecord:0,
-      wallet:0, inventory:[], integrity:60, corruptCount:0,
-      corruptionHistory:[]
-    }, a);
-    adv.baseAttrs = a.baseAttrs || {};
-    adv.initialAttrs = a.initialAttrs || Object.assign({}, adv.baseAttrs);
-    adv.stats = Object.assign(
-      {worked:0,injured:0,produced:{},downed:0,healed:0,cured:0,crimes:0,
-       wageEarned:0,entertaining:0,spent:0,feastHappy:0,passiveHappy:0,recovered:0},
-      a.stats||{}
-    );
-    adv.stats.produced = (a.stats && a.stats.produced) || {};
-    if(typeof adv.stats.recovered !== 'number') adv.stats.recovered = 0;
-    adv.taskCount = a.taskCount || a.profCount || {};
-    adv.profCount = adv.taskCount;
-    adv.diseases = (a.diseases||[]).map(dz=>{
-      const def = DISEASES[dz.name] || DISEASES['感冒'];
-      return {
-        name: dz.name,
-        days: typeof dz.days==='number' && !isNaN(dz.days) ? dz.days : rnd(def.days[0], def.days[1]),
-        severity: dz.severity || def.severity
-      };
+    const copyBtn = document.getElementById('btnCopyReg');
+    if (copyBtn) copyBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText(shareUrl).then(() => {
+        copyBtn.textContent = '已复制！';
+        setTimeout(() => copyBtn.textContent = '复制分享链接', 1500);
+      }).catch(() => prompt('请手动复制以下分享链接：', shareUrl));
     });
-    adv.criminal = !!a.criminal;
-    adv.imprisoned = typeof a.imprisoned==='number' ? a.imprisoned : 0;
-    adv.crimeRecord = a.crimeRecord || 0;
-    adv.wallet = typeof a.wallet==='number' && !isNaN(a.wallet) ? a.wallet : 0;
-    adv.inventory = Array.isArray(a.inventory) ? a.inventory.slice(0,15) : [];
-    adv.integrity = typeof a.integrity==='number' && !isNaN(a.integrity) ? a.integrity : 60;
-    adv.corruptCount = typeof a.corruptCount==='number' ? a.corruptCount : 0;
-    adv.corruptionHistory = Array.isArray(a.corruptionHistory) ? a.corruptionHistory.map(h=>({
-      day: typeof h.day === 'number' ? h.day : 0,
-      amount: typeof h.amount === 'number' && !isNaN(h.amount) ? h.amount : 0,
-      context: h.context || '未知'
-    })) : [];
-
-    const m = calcMax(adv);
-    if(typeof adv.hp!=='number' || isNaN(adv.hp) || !isFinite(adv.hp)) adv.hp = adv.status==='昏迷'?0:m.hp;
-    if(typeof adv.mind!=='number' || isNaN(adv.mind) || !isFinite(adv.mind)) adv.mind = adv.status==='昏迷'?0:m.mind;
-    adv.hp = clamp(adv.hp, 0, m.hp);
-    adv.mind = clamp(adv.mind, 0, m.mind);
-    if(typeof adv.happiness!=='number' || isNaN(adv.happiness)) adv.happiness = 60;
-    if(typeof adv.fatigue!=='number' || isNaN(adv.fatigue)) adv.fatigue = 0;
-    if(typeof adv.consecutiveWork!=='number' || isNaN(adv.consecutiveWork)) adv.consecutiveWork = 0;
-    if(typeof adv.lowHappyDays!=='number' || isNaN(adv.lowHappyDays)) adv.lowHappyDays = 0;
-    return adv;
-  });
-  return s;
-}
-
-/* ---------- 存读档 ----------
-   ★ save 会触发一次异步发布到共享注册表（节流由 shared.js 控制） */
-function save(){
-  try { localStorage.setItem(SAVE_KEY, JSON.stringify(state)); } catch(e){}
-  if (typeof publishMyCamp === 'function' && SHARED.enabled){
-    publishMyCamp(false);
+    const refreshBtn = document.getElementById('btnRefreshList');
+    if (refreshBtn) refreshBtn.addEventListener('click', showCampList);
   }
-}
-function load(){
-  try {
-    let raw = localStorage.getItem(SAVE_KEY);
-    if(!raw){
-      for(const k of LEGACY_KEYS){
-        raw = localStorage.getItem(k);
-        if(raw) break;
-      }
-    }
-    if(raw){
-      const s = JSON.parse(raw);
-      if(s && Array.isArray(s.adventurers) && s.res) return migrate(s);
-    }
-  } catch(e){}
-  return null;
-}
+
+  /* ★ 只向全局暴露这两个函数 —— 不会与其他文件冲突 */
+  window.showCampList = showCampList;
+  window.updateNetTag = updateNetTag;
+  window.ensureRegistryId = ensureRegistryId;
+  window.fetchRegistry = fetchRegistry;
+  window.pushRegistry = pushRegistry;
+  window.publishMyCamp = publishMyCamp;
+  window.myCampEntry = myCampEntry;
+
+  console.log('[shared.js] 已加载');
+})();
