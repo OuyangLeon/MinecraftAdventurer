@@ -1,5 +1,6 @@
 /* ============================================================
    logic.js —— 游戏核心逻辑：结算、贪污、巡逻、事件
+   ★ 已修复食物产出未入库的 bug
    ============================================================ */
 
 /* ---------- 建筑 ---------- */
@@ -266,10 +267,8 @@ function patrolInvestigate(patrolAdv, g, E, lines){
 }
 
 /* ============================================================
-   ★ 结算一天 —— 拆分为多个子函数，确保语法正确
+   子函数：单个冒险者执行行动
    ============================================================ */
-
-/* 子函数：单个冒险者执行行动，返回 {rest, work, entertain, build, important} */
 function _runOneAdventurer(adv, E, gain, lines){
   const result = { rest:null, work:null, entertain:0, build:0, important:[] };
 
@@ -528,7 +527,9 @@ function _runOneAdventurer(adv, E, gain, lines){
   return result;
 }
 
-/* 子函数：疾病处理 */
+/* ============================================================
+   子函数：疾病处理
+   ============================================================ */
 function _processDiseases(E, importantLines){
   state.adventurers.forEach(adv=>{
     if(!adv.diseases||!adv.diseases.length) return;
@@ -589,7 +590,9 @@ function _processDiseases(E, importantLines){
   });
 }
 
-/* 子函数：犯罪处理 */
+/* ============================================================
+   子函数：犯罪处理
+   ============================================================ */
 function _processCrime(pop, E, importantLines){
   let pressure = 0;
   const hungryCount = state.res.食物===0 ? pop : 0;
@@ -680,15 +683,23 @@ function _processCrime(pop, E, importantLines){
   state.crime.level = clamp(state.crime.level-2, 0, 100);
 }
 
-/* 子函数：食物消耗（先记录收获，再扣仓库） */
+/* ============================================================
+   ★ 子函数：食物 —— 先入库，再扣消耗
+   ============================================================ */
 function _processFood(pop, E, gain, importantLines){
+  // ★ 第一步：当日食物产出入库
   if(gain.食物 > 0){
-    addLog(`🌾 今日收获食物 +${gain.食物}。`, 'good');
+    state.res.食物 = (state.res.食物||0) + gain.食物;
+    state.totals.produced['食物'] = (state.totals.produced['食物']||0) + gain.食物;
+    addLog(`🌾 今日收获食物 +${gain.食物}（仓库存量 ${state.res.食物}）。`, 'good');
   }
+
+  // ★ 第二步：扣除当日消耗
   if(pop>0){
     let need = 0;
     state.adventurers.forEach(adv=>{ need += raceFoodCost(adv); });
     need = Math.max(0, need - E.食物减免);
+
     if(state.res.食物 >= need){
       state.res.食物 -= need;
       addLog(`🍖 全员消耗食物 ${need} 单位${E.食物减免?`（建筑减免 ${E.食物减免}）`:''}。`, '');
@@ -705,23 +716,26 @@ function _processFood(pop, E, gain, importantLines){
       });
     }
   }
+
+  // ★ 第三步：清空 gain.食物，避免 _processStorage 重复入库
+  gain.食物 = 0;
 }
 
-/* 子函数：入库（除食物） */
+/* ============================================================
+   子函数：其余资源入库
+   ============================================================ */
 function _processStorage(gain){
   Object.keys(gain).forEach(k=>{
-    if(k==='食物') return;
     if(gain[k]>0){
       state.res[k] = (state.res[k]||0) + gain[k];
       state.totals.produced[k] = (state.totals.produced[k]||0) + gain[k];
     }
   });
-  if(gain.食物 > 0){
-    state.totals.produced['食物'] = (state.totals.produced['食物']||0) + gain.食物;
-  }
 }
 
-/* 子函数：工资 */
+/* ============================================================
+   子函数：工资
+   ============================================================ */
 function _processWages(pop, importantLines){
   if(pop<=0) return;
   const isPayday = state.day % WAGE_PERIOD === 0;
@@ -757,7 +771,9 @@ function _processWages(pop, importantLines){
   });
 }
 
-/* 子函数：幸福演变 + 离开 + 夜袭 */
+/* ============================================================
+   子函数：幸福演变 + 夜袭
+   ============================================================ */
 function _processHappinessAndRaid(pop, E, importantLines){
   const bedCount = E.床位;
   state.adventurers.forEach(adv=>{
@@ -810,7 +826,9 @@ function _processHappinessAndRaid(pop, E, importantLines){
   }
 }
 
-/* ★ 主入口：结算一天 */
+/* ============================================================
+   ★ 主入口：结算一天
+   ============================================================ */
 function nextDay(){
   const lines = [];
   const gain = {食物:0,木材:0,石头:0,铁:0,金币:0,绿宝石:0};
@@ -916,10 +934,10 @@ function nextDay(){
   /* ---- 犯罪 ---- */
   _processCrime(pop, E, importantLines);
 
-  /* ---- 食物 ---- */
+  /* ---- ★ 食物：先入库，再扣消耗 ---- */
   _processFood(pop, E, gain, importantLines);
 
-  /* ---- 入库 ---- */
+  /* ---- 其余资源入库 ---- */
   _processStorage(gain);
 
   /* ---- 幸福演变 + 夜袭 ---- */
