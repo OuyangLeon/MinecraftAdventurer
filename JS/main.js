@@ -1,7 +1,15 @@
 /* ============================================================
    main.js —— 事件绑定与启动（最后加载）
+   ★ v15：防止重复绑定 + 重置时彻底清空状态
    ============================================================ */
 
+/* 防止 UI 初始化重复执行的标志 */
+var _uiInitialized = false;
+var _sharedInitScheduled = false;
+
+/* ============================================================
+   事件绑定（有 listenersBound 保护，只绑定一次）
+   ============================================================ */
 function bindEvents(){
   if(listenersBound) return;
   listenersBound = true;
@@ -77,17 +85,10 @@ function bindEvents(){
 
   /* ---- 结局弹窗 ---- */
   $('#btnEndContinue').addEventListener('click', ()=>{ $('#endMask').classList.remove('on'); });
-$('#btnEndRestart').addEventListener('click', ()=>{
-  if(!confirm('确定要重新开始吗？')) return;
-  localStorage.removeItem(SAVE_KEY);
-  LEGACY_KEYS.forEach(k=>localStorage.removeItem(k));
-  state = null;
-  endingsShown = {victory:false, defeat:false};
-  pendingEvents = [];
-  document.querySelectorAll('.mask.on').forEach(el=>el.classList.remove('on'));
-  _uiInitialized = false;
-  bootstrap();
-});
+  $('#btnEndRestart').addEventListener('click', ()=>{
+    if(!confirm('确定要重新开始吗？')) return;
+    resetAndRestart();
+  });
 
   /* ---- 日志过滤 ---- */
   document.querySelectorAll('#logFilter button').forEach(btn=>{
@@ -121,17 +122,10 @@ $('#btnEndRestart').addEventListener('click', ()=>{
   });
 
   /* ---- 重置存档 ---- */
-$('#btnReset').addEventListener('click', ()=>{
-  if(!confirm('确定要清空全部进度并重新开始吗？\n建议先导出存档备份。')) return;
-  localStorage.removeItem(SAVE_KEY);
-  LEGACY_KEYS.forEach(k=>localStorage.removeItem(k));
-  state = null;
-  endingsShown = {victory:false, defeat:false};
-  pendingEvents = [];                                              // ★ 清空事件队列
-  document.querySelectorAll('.mask.on').forEach(el=>el.classList.remove('on')); // ★ 关闭所有弹窗
-  _uiInitialized = false;                                          // ★ 允许重新初始化 UI
-  bootstrap();
-});
+  $('#btnReset').addEventListener('click', ()=>{
+    if(!confirm('确定要清空全部进度并重新开始吗？\n建议先导出存档备份。')) return;
+    resetAndRestart();
+  });
 
   /* ---- Esc 关闭弹窗 ---- */
   document.addEventListener('keydown', e=>{
@@ -142,56 +136,38 @@ $('#btnReset').addEventListener('click', ()=>{
       $('#campMask').classList.remove('on');
       $('#nameMask').classList.remove('on');
       $('#campListMask').classList.remove('on');
+      $('#eventMask').classList.remove('on');
     }
   });
 }
 
-function bootstrap(){
-  state = load();
-  if(!state){
-    state = defaultState();
-    const seeds = [
-      ['艾琳娜','人类','神秘使'],
-      ['格罗姆','骷髅','受契之人'],
-      ['缇娅','猪灵','炼金术士'],
-      ['布洛姆','人类','凡俗者'],
-      ['薇拉','猪灵','神秘使']
-    ];
-    seeds.forEach(([n,r,p])=>{
-      const adv = newAdventurer(n,r,p,rollBaseAttrs());
-      if(Math.random()<.6) adv.inventory.push(pick(PERSONAL_ITEMS));
-      state.adventurers.push(adv);
-    });
-    state.campName = pick(['翠','金','石','铁','木','水','火','风','雷','霜'])+'石营地';
-    state.campId = 'camp_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
-    addLog(`🏕 你在主世界边缘建立了一处小小据点「${state.campName}」，冒险者们慕名而来。`, 'epic');
-    addLog('提示：巡逻有机会查获贪污并追回赃款；点击营地名称可改名。', '');
-    save();
-  }
-  if(!state.campName) state.campName = pick(['翠','金','石','铁','木','水','火','风','雷','霜'])+'石营地';
-  if(!state.campId) state.campId = 'camp_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+/* ============================================================
+   ★ 统一的重置逻辑 —— 清空所有临时状态，防止残留
+   ============================================================ */
+function resetAndRestart(){
+  // 1. 清空 localStorage 中的所有存档键
+  localStorage.removeItem(SAVE_KEY);
+  LEGACY_KEYS.forEach(k=>localStorage.removeItem(k));
 
-  validateState();
+  // 2. 清空内存中的全局状态
+  state = null;
+  endingsShown = { victory: false, defeat: false };
+  pendingEvents = [];
+  editingId = null;
 
-  initModalSelects();
-  bindEvents();
-  renderNow();
+  // 3. 关闭所有打开的弹窗
+  document.querySelectorAll('.mask.on').forEach(el=>el.classList.remove('on'));
 
-  // 首次启动异步初始化共享注册表
-  setTimeout(async ()=>{
-    const id = await ensureRegistryId();
-    if (id){
-      console.log('[共享注册表] ID: ' + id);
-      await publishMyCamp(true);
-      updateNetTag();
-    }
-  }, 500);
+  // 4. 允许 UI 初始化重新执行（但事件监听器仍然保持单次）
+  _uiInitialized = false;
+
+  // 5. 重新启动
+  bootstrap();
 }
 
-/* ★ 新增：防止 UI 初始化重复执行 */
-var _uiInitialized = false;
-var _sharedInitScheduled = false;
-
+/* ============================================================
+   启动
+   ============================================================ */
 function bootstrap(){
   state = load();
   if(!state){
@@ -225,7 +201,10 @@ function bootstrap(){
     _uiInitialized = true;
   }
 
-  bindEvents();  // 有 listenersBound 保护，只绑定一次
+  // ★ 事件绑定有 listenersBound 保护，只绑定一次
+  bindEvents();
+
+  // 首次渲染
   renderNow();
 
   // ★ 共享注册表初始化只跑一次，避免重复 setTimeout
@@ -241,3 +220,6 @@ function bootstrap(){
     }, 500);
   }
 }
+
+/* 启动游戏 */
+bootstrap();
