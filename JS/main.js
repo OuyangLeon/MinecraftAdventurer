@@ -77,14 +77,17 @@ function bindEvents(){
 
   /* ---- 结局弹窗 ---- */
   $('#btnEndContinue').addEventListener('click', ()=>{ $('#endMask').classList.remove('on'); });
-  $('#btnEndRestart').addEventListener('click', ()=>{
-    if(!confirm('确定要重新开始吗？')) return;
-    localStorage.removeItem(SAVE_KEY);
-    LEGACY_KEYS.forEach(k=>localStorage.removeItem(k));
-    state = null;
-    endingsShown = {victory:false, defeat:false};
-    bootstrap();
-  });
+$('#btnEndRestart').addEventListener('click', ()=>{
+  if(!confirm('确定要重新开始吗？')) return;
+  localStorage.removeItem(SAVE_KEY);
+  LEGACY_KEYS.forEach(k=>localStorage.removeItem(k));
+  state = null;
+  endingsShown = {victory:false, defeat:false};
+  pendingEvents = [];
+  document.querySelectorAll('.mask.on').forEach(el=>el.classList.remove('on'));
+  _uiInitialized = false;
+  bootstrap();
+});
 
   /* ---- 日志过滤 ---- */
   document.querySelectorAll('#logFilter button').forEach(btn=>{
@@ -118,14 +121,17 @@ function bindEvents(){
   });
 
   /* ---- 重置存档 ---- */
-  $('#btnReset').addEventListener('click', ()=>{
-    if(!confirm('确定要清空全部进度并重新开始吗？\n建议先导出存档备份。')) return;
-    localStorage.removeItem(SAVE_KEY);
-    LEGACY_KEYS.forEach(k=>localStorage.removeItem(k));
-    state = null;
-    endingsShown = {victory:false, defeat:false};
-    bootstrap();
-  });
+$('#btnReset').addEventListener('click', ()=>{
+  if(!confirm('确定要清空全部进度并重新开始吗？\n建议先导出存档备份。')) return;
+  localStorage.removeItem(SAVE_KEY);
+  LEGACY_KEYS.forEach(k=>localStorage.removeItem(k));
+  state = null;
+  endingsShown = {victory:false, defeat:false};
+  pendingEvents = [];                                              // ★ 清空事件队列
+  document.querySelectorAll('.mask.on').forEach(el=>el.classList.remove('on')); // ★ 关闭所有弹窗
+  _uiInitialized = false;                                          // ★ 允许重新初始化 UI
+  bootstrap();
+});
 
   /* ---- Esc 关闭弹窗 ---- */
   document.addEventListener('keydown', e=>{
