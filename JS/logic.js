@@ -1,6 +1,12 @@
 /* ============================================================
    logic.js —— 游戏核心逻辑：结算、贪污、巡逻、事件
    ★ 已修复食物产出未入库的 bug
+   ★ 新增：羁押者劳动 + 诚信恢复 + 越狱判定
+   ============================================================ */
+
+/* ============================================================
+   logic.js —— 游戏核心逻辑：结算、贪污、巡逻、事件
+   ★ v13 新增：羁押者劳动 + 诚信恢复 + 越狱判定
    ============================================================ */
 
 /* ---------- 建筑 ---------- */
@@ -78,7 +84,7 @@ function holdFeast(){
 
 /* ---------- 个人消费 ---------- */
 function tryPersonalSpending(adv, lines){
-  if(adv.status==='昏迷' || adv.imprisoned>0) return;
+  if(adv.status==='昏迷' || adv.imprisoned>0) return;  // 羁押者不消费
   if(adv.happiness>=80) return;
   if(adv.race==='猪灵'){
     if(Math.random()<.25){
@@ -183,7 +189,11 @@ function calcYield(adv, task, g, E){
   if(!t || t.base===0) return 0;
   const attrVal = a[t.attrKey] || 10;
   const attrMul = t.attrScale + (attrVal/20) * (1 - t.attrScale) + (attrVal/20 - .5) * .3;
-  const eff = happinessMul(adv.happiness) * diseaseWorkMul(adv) * raceWorkMul(adv, task);
+
+  // ★ 羁押者效率减半
+  const prisonMul = adv.imprisoned > 0 ? 0.5 : 1;
+
+  const eff = happinessMul(adv.happiness) * diseaseWorkMul(adv) * raceWorkMul(adv, task) * prisonMul;
   let mult = E.产量倍率 * eff * attrMul;
   if(task==='伐木') mult *= E.伐木倍率;
   if(task==='耕作') mult *= E.耕作倍率;
@@ -268,6 +278,7 @@ function patrolInvestigate(patrolAdv, g, E, lines){
 
 /* ============================================================
    子函数：单个冒险者执行行动
+   ★ 羁押者可劳动，但禁止外勤任务，效率减半
    ============================================================ */
 function _runOneAdventurer(adv, E, gain, lines){
   const result = { rest:null, work:null, entertain:0, build:0, important:[] };
@@ -275,7 +286,15 @@ function _runOneAdventurer(adv, E, gain, lines){
   const a = getAttrs(adv);
   const max = calcMax(adv);
 
-  if(adv.imprisoned>0) return result;
+  const isImprisoned = adv.imprisoned > 0;
+
+  // ★ 羁押者：外勤类任务强制改为休息
+  if (isImprisoned) {
+    const forbidden = ['巡逻','娱乐','行医','狩猎','探索'];
+    if (forbidden.includes(adv.task)) {
+      adv.task = '休息';
+    }
+  }
 
   if(adv.status==='昏迷'){
     if(Math.random()<.35){
@@ -292,15 +311,17 @@ function _runOneAdventurer(adv, E, gain, lines){
   /* ---- 休息 ---- */
   if(adv.task==='休息'){
     const restMul = Math.max(.5, safe(E.休息倍率,1));
-    const heal = Math.max(3, Math.round(max.hp*.40*restMul));
-    const mheal = Math.max(3, Math.round(max.mind*.50*restMul)) + safe(E.心理恢复,0);
+    // 羁押者休息效果也减半（牢房里条件差）
+    const prisonRestMul = isImprisoned ? 0.6 : 1;
+    const heal = Math.max(2, Math.round(max.hp*.40*restMul*prisonRestMul));
+    const mheal = Math.max(2, Math.round(max.mind*.50*restMul*prisonRestMul)) + safe(E.心理恢复,0);
     const before = adv.hp;
     adv.hp = Math.min(max.hp, adv.hp+heal);
     adv.mind = Math.min(max.mind, adv.mind+mheal);
     adv.stats.healed = (adv.stats.healed||0) + (adv.hp-before);
     adv.consecutiveWork = 0;
     adv.fatigue = clamp(adv.fatigue-65,0,100);
-    const restHappy = 8 + Math.round((state.buildings['住房']||0)*2);
+    const restHappy = isImprisoned ? 2 : (8 + Math.round((state.buildings['住房']||0)*2));
     adv.happiness = clamp(adv.happiness+restHappy,0,100);
     adv.stats.feastHappy += restHappy;
     result.rest = {name:adv.name, hp:adv.hp-before, mind:mheal, happy:restHappy};
@@ -315,7 +336,8 @@ function _runOneAdventurer(adv, E, gain, lines){
       result.work = {task:'闲着', count:1, total:0};
       return result;
     }
-    const eff = happinessMul(adv.happiness) * diseaseWorkMul(adv) * raceWorkMul(adv,'建造');
+    const prisonMul = isImprisoned ? 0.5 : 1;
+    const eff = happinessMul(adv.happiness) * diseaseWorkMul(adv) * raceWorkMul(adv,'建造') * prisonMul;
     const contrib = Math.max(1, Math.round((1+Math.floor(a.力量/6)) * eff));
     const pj = state.project;
     if(typeof pj.required !== 'number' || isNaN(pj.required) || pj.required <= 0){
@@ -328,7 +350,7 @@ function _runOneAdventurer(adv, E, gain, lines){
     adv.fatigue = clamp(adv.fatigue+8,0,100);
     state.totals.worked++;
     result.build = contrib;
-    maybeCorrupt(adv,'建造',result.important);
+    if (!isImprisoned) maybeCorrupt(adv,'建造',result.important);  // 羁押者无法贪污
     if(pj.progress >= pj.required){
       const newLv = pj.targetLevel;
       state.buildings[pj.key] = newLv;
@@ -339,7 +361,7 @@ function _runOneAdventurer(adv, E, gain, lines){
     return result;
   }
 
-  /* ---- 巡逻 ---- */
+  /* ---- 巡逻（羁押者已在上方被过滤） ---- */
   if(adv.task==='巡逻'){
     const roll = d(20);
     const total = roll + (a.意志||10) + (a.灵感||10)/2 + E.检定加值;
@@ -367,7 +389,7 @@ function _runOneAdventurer(adv, E, gain, lines){
     return result;
   }
 
-  /* ---- 娱乐 ---- */
+  /* ---- 娱乐（羁押者已在上方被过滤） ---- */
   if(adv.task==='娱乐'){
     const roll = d(20);
     const total = roll + (a.魅力||10)*1.2 + (a.灵感||10)/2 + E.检定加值;
@@ -389,7 +411,7 @@ function _runOneAdventurer(adv, E, gain, lines){
     return result;
   }
 
-  /* ---- 行医 ---- */
+  /* ---- 行医（羁押者已在上方被过滤） ---- */
   if(adv.task==='行医'){
     if(adv.path!=='炼金术士'){
       result.important.push({text:`⚕ <b>${adv.name}</b> 非炼金术士，无法行医。`, type:'warn'});
@@ -431,7 +453,8 @@ function _runOneAdventurer(adv, E, gain, lines){
     return result;
   }
 
-  /* ---- 劳作 ---- */
+  /* ---- 劳作（含羁押者） ---- */
+  const prisonMul = isImprisoned ? 0.5 : 1;
   const mainVal = a[task.main] || 10;
   const pathBonus = (PATHS[adv.path] && PATHS[adv.path].bonus[adv.task]) || 0;
   const profBonus = (adv.taskCount[adv.task]||0)>=15 ? 3 : (adv.taskCount[adv.task]||0)>=8 ? 1 : 0;
@@ -460,12 +483,13 @@ function _runOneAdventurer(adv, E, gain, lines){
       gain.铁 = (gain.铁||0) + iron;
       adv.stats.produced['铁'] = (adv.stats.produced['铁']||0) + iron;
     }
-    maybeCorrupt(adv,'生产',result.important,gain,task.res);
+    // 羁押者无法贪污（已经在牢里）
+    if (!isImprisoned) maybeCorrupt(adv,'生产',result.important,gain,task.res);
   } else if(g.k==='F'){
     result.important.push({text:`${task.icon} <b>${adv.name}</b> ${adv.task}【大失败】一无所获。`, type:'warn'});
   }
 
-  result.work = {task:adv.task, count:1, total:amount};
+  result.work = {task:adv.task, count:1, total:amount, imprisoned:isImprisoned};
 
   if(task.risk && g.k==='F'){
     const dmg = Math.max(1, Math.round(rnd(3,8)*E.受伤倍率));
@@ -605,6 +629,7 @@ function _processCrime(pop, E, importantLines){
 
   const crimeChance = state.crime.level/100 * .35;
   if(state.adventurers.length>0 && Math.random()<crimeChance){
+    // ★ 只有自由人才能犯新罪
     const candidates = state.adventurers.filter(a=>a.status!=='昏迷'&&a.imprisoned===0);
     if(candidates.length){
       candidates.sort((x,y)=>{
@@ -613,7 +638,7 @@ function _processCrime(pop, E, importantLines){
         return sy-sx;
       });
       const criminal = candidates[0];
-      const richTargets = state.adventurers.filter(x=>x.id!==criminal.id && x.wallet>5);
+      const richTargets = state.adventurers.filter(x=>x.id!==criminal.id && x.wallet>5 && x.imprisoned===0);
       const useTheft = richTargets.length>0 && Math.random()<.5;
       state.crime.totalCrimes++;
       state.crime.criminals++;
@@ -647,7 +672,7 @@ function _processCrime(pop, E, importantLines){
             importantLines.push({text:`🚨 <b>${criminal.name}</b> 破坏工程（-${dmg}）。`, type:'bad'});
           }
         } else if(crime==='斗殴伤人'){
-          const others = state.adventurers.filter(x=>x.id!==criminal.id && x.status!=='昏迷');
+          const others = state.adventurers.filter(x=>x.id!==criminal.id && x.status!=='昏迷' && x.imprisoned===0);
           if(others.length){
             const victim = pick(others);
             const dmg = rnd(2,6);
@@ -684,17 +709,88 @@ function _processCrime(pop, E, importantLines){
 }
 
 /* ============================================================
+   ★ 子函数：羁押者处理 —— 减刑 / 诚信恢复 / 越狱
+   ============================================================ */
+function _processPrisoners(importantLines){
+  // ① 减刑倒计时（先释放，这样今天就能领工资/劳动）
+  state.adventurers.forEach(adv=>{
+    if(adv.imprisoned > 0){
+      adv.imprisoned--;
+      if(adv.imprisoned === 0){
+        importantLines.push({text:`🔓 <b>${adv.name}</b> 刑满释放，重新成为自由人。`, type:'good'});
+      }
+    }
+  });
+
+  // ② 仍在羁押中的处理
+  const prisoners = state.adventurers.filter(a => a.imprisoned > 0);
+  if (!prisoners.length) return;
+
+  // 统计巡逻者（昏迷/羁押者不算）
+  const patrolCount = state.adventurers.filter(a =>
+    a.task === '巡逻' && a.imprisoned === 0 && a.status !== '昏迷'
+  ).length;
+
+  const escapedList = [];
+
+  prisoners.forEach(adv => {
+    // 诚信恢复：每天 +2（坐牢反思）
+    adv.integrity = clamp(adv.integrity + 2, 0, 100);
+
+    // 越狱判定：仅在无人巡逻时触发
+    if (patrolCount === 0) {
+      // 基础越狱概率 15%，诚信越高越不容易越狱
+      let escapeChance = 0.15 * (1 - adv.integrity / 200);
+      // 剩余刑期越长越想跑
+      if (adv.imprisoned >= 3) escapeChance *= 1.3;
+      else if (adv.imprisoned === 1) escapeChance *= 0.5;
+      // 幸福太低更容易跑
+      if (adv.happiness < 20) escapeChance *= 1.5;
+
+      escapeChance = clamp(escapeChance, 0, 0.5);
+
+      if (Math.random() < escapeChance) {
+        escapedList.push(adv);
+      }
+    }
+  });
+
+  // ③ 处理越狱者
+  escapedList.forEach(adv => {
+    importantLines.push({
+      text: `🏃 <b>${adv.name}</b> 趁无人巡逻之机，翻墙越狱逃脱！个人财产 ${adv.wallet.toFixed(1)} 金币一并带走。`,
+      type: 'bad'
+    });
+    adv._escape = true;
+  });
+
+  if (escapedList.length) {
+    state.adventurers = state.adventurers.filter(a => !a._escape);
+    escapedList.forEach(a => delete a._escape);
+  }
+
+  // ④ 无人巡逻预警（若还有囚犯留在狱中）
+  const remainingPrisoners = state.adventurers.filter(a => a.imprisoned > 0).length;
+  if (remainingPrisoners > 0 && patrolCount === 0 && escapedList.length === 0) {
+    importantLines.push({
+      text: `⚠️ 据点无人巡逻，${remainingPrisoners} 名囚犯蠢蠢欲动……（安排巡逻可阻止越狱）`,
+      type: 'warn'
+    });
+  }
+}
+
+/* ============================================================
    ★ 子函数：食物 —— 先入库，再扣消耗
    ============================================================ */
 function _processFood(pop, E, gain, importantLines){
-  // ★ 第一步：当日食物产出入库
+  // 第一步：当日食物产出入库
   if(gain.食物 > 0){
     state.res.食物 = (state.res.食物||0) + gain.食物;
     state.totals.produced['食物'] = (state.totals.produced['食物']||0) + gain.食物;
     addLog(`🌾 今日收获食物 +${gain.食物}（仓库存量 ${state.res.食物}）。`, 'good');
   }
 
-  // ★ 第二步：扣除当日消耗
+  // 第二步：扣除当日消耗
   if(pop>0){
     let need = 0;
     state.adventurers.forEach(adv=>{ need += raceFoodCost(adv); });
@@ -717,7 +813,7 @@ function _processFood(pop, E, gain, importantLines){
     }
   }
 
-  // ★ 第三步：清空 gain.食物，避免 _processStorage 重复入库
+  // 第三步：清空 gain.食物，避免 _processStorage 重复入库
   gain.食物 = 0;
 }
 
@@ -734,24 +830,39 @@ function _processStorage(gain){
 }
 
 /* ============================================================
-   子函数：工资
+   ★ 子函数：工资 —— 只发给自由人
    ============================================================ */
 function _processWages(pop, importantLines){
   if(pop<=0) return;
   const isPayday = state.day % WAGE_PERIOD === 0;
   if(!isPayday) return;
 
-  let totalNeed = Math.round(totalMonthlyWage()*10)/10;
+  // 只统计非羁押者的工资
+  let totalNeed = 0;
+  state.adventurers.forEach(adv => {
+    if (adv.imprisoned > 0) return;
+    totalNeed += monthlyWage(adv);
+  });
+  totalNeed = Math.round(totalNeed * 10) / 10;
+
+  if (totalNeed <= 0) {
+    importantLines.push({text:`💰 【发薪日】所有冒险者均在羁押中，无需发放工资。`, type:'warn'});
+    return;
+  }
+
   const paid = Math.min(state.res.金币, totalNeed);
   state.res.金币 -= paid;
   state.totals.wages += paid;
   const ratio = totalNeed>0 ? paid/totalNeed : 1;
 
-  if(ratio>=1) importantLines.push({text:`💰 【发薪日】全员发放月薪共 ${totalNeed.toFixed(1)} 金币。`, type:'epic'});
+  if(ratio>=1) importantLines.push({text:`💰 【发薪日】发放月薪共 ${totalNeed.toFixed(1)} 金币（不含羁押者）。`, type:'epic'});
   else if(ratio>0) importantLines.push({text:`💰 【发薪日】仅发放 ${paid.toFixed(1)}/${totalNeed.toFixed(1)}（拖欠 ${(totalNeed-paid).toFixed(1)}）。`, type:'warn'});
   else importantLines.push({text:`💸 【发薪日】金币枯竭，全员未领工资！`, type:'bad'});
 
   state.adventurers.forEach(adv=>{
+    // ★ 羁押者不领工资
+    if (adv.imprisoned > 0) return;
+
     const want = monthlyWage(adv);
     const got = Math.round(want*ratio*10)/10;
     adv.wallet += got;
@@ -778,7 +889,7 @@ function _processHappinessAndRaid(pop, E, importantLines){
   const bedCount = E.床位;
   state.adventurers.forEach(adv=>{
     if(adv.status==='昏迷'){ adv.happiness = clamp(adv.happiness-1,0,100); return; }
-    if(adv.imprisoned>0){ adv.happiness = clamp(adv.happiness-3,0,100); return; }
+    if(adv.imprisoned>0){ adv.happiness = clamp(adv.happiness-3,0,100); return; }  // 坐牢 -3/天
     let delta = 0;
     if(bedCount>=pop) delta += 5 + (state.buildings['住房']||0);
     else delta -= 12;
@@ -848,6 +959,7 @@ function nextDay(){
     if(typeof adv.wallet!=='number'||isNaN(adv.wallet)) adv.wallet = 0;
     if(typeof adv.integrity!=='number'||isNaN(adv.integrity)) adv.integrity = 60;
     if(typeof adv.consecutiveWork!=='number'||isNaN(adv.consecutiveWork)) adv.consecutiveWork = 0;
+    if(typeof adv.imprisoned!=='number'||isNaN(adv.imprisoned)) adv.imprisoned = 0;
     if(!adv.taskCount) adv.taskCount = {};
     if(!adv.profCount) adv.profCount = {};
     if(!Array.isArray(adv.corruptionHistory)) adv.corruptionHistory = [];
@@ -858,17 +970,115 @@ function nextDay(){
   if(state.feast.cooldown>0) state.feast.cooldown--;
   if(state.feast.bonusDays>0) state.feast.bonusDays--;
 
-  state.adventurers.forEach(adv=>{
-    if(adv.imprisoned>0){
-      adv.imprisoned--;
-      if(adv.imprisoned===0) lines.push({text:`🔓 <b>${adv.name}</b> 刑满释放。`, type:'good'});
-    }
-  });
-
   const summary = {rest:[], work:{}, entertain:0, build:0};
   const importantLines = [];
 
-  // 每位冒险者依次行动
+  /* ---- ① 羁押者处理：减刑 / 诚信恢复 / 越狱 ---- */
+/* ============================================================
+   ★ 子函数：羁押者处理 —— 减刑 / 诚信恢复 / 越狱（含被抓回）
+   ★ v14：无论是否有巡逻都可能越狱；被抓回后加刑
+   ============================================================ */
+function _processPrisoners(importantLines){
+  // ① 减刑倒计时（先释放，这样今天就能领工资/劳动）
+  state.adventurers.forEach(adv=>{
+    if(adv.imprisoned > 0){
+      adv.imprisoned--;
+      if(adv.imprisoned === 0){
+        importantLines.push({text:`🔓 <b>${adv.name}</b> 刑满释放，重新成为自由人。`, type:'good'});
+      }
+    }
+  });
+
+  // ② 仍在羁押中的处理
+  const prisoners = state.adventurers.filter(a => a.imprisoned > 0);
+  if (!prisoners.length) return;
+
+  // 统计巡逻者（昏迷/羁押者不算）
+  const patrolCount = state.adventurers.filter(a =>
+    a.task === '巡逻' && a.imprisoned === 0 && a.status !== '昏迷'
+  ).length;
+  const hasPatrol = patrolCount > 0;
+
+  const escapedList = [];      // 越狱成功
+  const recapturedList = [];   // 越狱未遂，被抓回
+
+  prisoners.forEach(adv => {
+    // ── 每日诚信恢复 +2（坐牢反思） ──
+    adv.integrity = clamp(adv.integrity + 2, 0, 100);
+
+    /* ★ 越狱判定：无论是否有巡逻都会发生，但有巡逻时概率大幅降低 */
+    let baseEscape = hasPatrol ? 0.08 : 0.20;
+    let escapeChance = baseEscape * (1 - adv.integrity / 200);
+
+    // 剩余刑期越长越想跑
+    if (adv.imprisoned >= 3) escapeChance *= 1.3;
+    else if (adv.imprisoned === 1) escapeChance *= 0.5;
+
+    // 幸福太低更容易铤而走险
+    if (adv.happiness < 20) escapeChance *= 1.5;
+
+    // 上限：有巡逻 25%，无巡逻 50%
+    const cap = hasPatrol ? 0.25 : 0.50;
+    escapeChance = clamp(escapeChance, 0, cap);
+
+    if (Math.random() >= escapeChance) return;   // 没跑
+
+    /* ★ 越狱尝试 → 是否被抓回来，取决于巡逻覆盖率 */
+    // 有巡逻：75% 被抓回；无巡逻：仅 30% 被抓回
+    const recaptureChance = hasPatrol ? 0.75 : 0.30;
+
+    if (Math.random() < recaptureChance) {
+      // ── 越狱未遂，被巡逻者抓回 → 加刑 ──
+      const extraDays = rnd(3, 5);
+      // ★ 剩余刑期重新计算：原剩余 + 加刑
+      adv.imprisoned = adv.imprisoned + extraDays;
+      adv.integrity = clamp(adv.integrity - 15, 0, 100);   // 越狱未遂，诚信 -15
+      adv.happiness = clamp(adv.happiness - 12, 0, 100);   // 心情挫败
+      adv.crimeRecord = (adv.crimeRecord || 0) + 1;        // 记一次新罪
+      recapturedList.push({ adv, extraDays });
+    } else {
+      // ── 越狱成功，逃之夭夭 ──
+      escapedList.push(adv);
+    }
+  });
+
+  // ③ 处理越狱成功者（从据点移除，带走个人财物）
+  escapedList.forEach(adv => {
+    importantLines.push({
+      text: `🏃 <b>${adv.name}</b> 翻墙越狱逃脱！个人财产 ${adv.wallet.toFixed(1)} 金币一并带走。`,
+      type: 'bad'
+    });
+    adv._escape = true;
+  });
+  if (escapedList.length) {
+    state.adventurers = state.adventurers.filter(a => !a._escape);
+    escapedList.forEach(a => delete a._escape);
+  }
+
+  // ④ 处理越狱未遂者（日志提示）
+  recapturedList.forEach(({ adv, extraDays }) => {
+    const who = hasPatrol ? '巡逻队' : '守卫';
+    importantLines.push({
+      text: `🚨 <b>${adv.name}</b> 试图越狱，被${who}当场抓回！加刑 ${extraDays} 天（剩余刑期 ${adv.imprisoned} 天），诚信 -15。`,
+      type: 'warn'
+    });
+  });
+
+  // ⑤ 无人巡逻预警（仅当今天没有任何越狱事件发生时提示）
+  const remainingPrisoners = state.adventurers.filter(a => a.imprisoned > 0).length;
+  if (remainingPrisoners > 0 && !hasPatrol
+      && escapedList.length === 0 && recapturedList.length === 0) {
+    importantLines.push({
+      text: `⚠️ 据点无人巡逻，${remainingPrisoners} 名囚犯蠢蠢欲动……（安排巡逻可降低越狱概率、提高抓回率）`,
+      type: 'warn'
+    });
+  }
+}
+
+  /* ---- ② 工资（只发自由人） ---- */
+  _processWages(pop, importantLines);
+
+  /* ---- ③ 每位冒险者依次行动 ---- */
   state.adventurers.forEach(adv=>{
     const r = _runOneAdventurer(adv, E, gain, lines);
     if(r.rest) summary.rest.push(r.rest);
@@ -883,18 +1093,18 @@ function nextDay(){
     r.important.forEach(x=>importantLines.push(x));
   });
 
-  /* ---- 建筑产出 ---- */
+  /* ---- ④ 建筑产出 ---- */
   if(E.每日食物>0) gain.食物 = (gain.食物||0) + E.每日食物;
   if(E.每日石头>0) gain.石头 = (gain.石头||0) + E.每日石头;
 
-  /* ---- 种族被动产出 ---- */
+  /* ---- ⑤ 种族被动产出 ---- */
   state.adventurers.forEach(adv=>{
     if(adv.status==='昏迷') return;
     const out = raceDailyOutput(adv);
     for(const [r,v] of Object.entries(out)) gain[r] = (gain[r]||0) + v;
   });
 
-  /* ---- 建筑被动幸福 / 疲劳 ---- */
+  /* ---- ⑥ 建筑被动幸福 / 疲劳 ---- */
   if(E.每日幸福>0 || E.疲劳恢复>0){
     state.adventurers.forEach(adv=>{
       if(adv.status==='昏迷'||adv.imprisoned>0) return;
@@ -906,7 +1116,7 @@ function nextDay(){
     });
   }
 
-  /* ---- 篝火余韵 ---- */
+  /* ---- ⑦ 篝火余韵 ---- */
   if(state.feast.bonusDays>0){
     state.adventurers.forEach(adv=>{
       if(adv.status==='昏迷'||adv.imprisoned>0) return;
@@ -915,35 +1125,32 @@ function nextDay(){
     });
   }
 
-  /* ---- 商路被动 ---- */
+  /* ---- ⑧ 商路被动 ---- */
   if(state.flags && state.flags.tradeRoute){
     gain.金币 = (gain.金币||0) + 5;
   }
 
-  /* ---- 工资 ---- */
-  _processWages(pop, importantLines);
-
-  /* ---- 个人消费 ---- */
+  /* ---- ⑨ 个人消费 ---- */
   const spendingLines = [];
   state.adventurers.forEach(adv=>tryPersonalSpending(adv, spendingLines));
   spendingLines.forEach(l=>importantLines.push(l));
 
-  /* ---- 疾病 ---- */
+  /* ---- ⑩ 疾病 ---- */
   _processDiseases(E, importantLines);
 
-  /* ---- 犯罪 ---- */
+  /* ---- ⑪ 犯罪（自由人才会犯新罪） ---- */
   _processCrime(pop, E, importantLines);
 
-  /* ---- ★ 食物：先入库，再扣消耗 ---- */
+  /* ---- ⑫ 食物：先入库，再扣消耗 ---- */
   _processFood(pop, E, gain, importantLines);
 
-  /* ---- 其余资源入库 ---- */
+  /* ---- ⑬ 其余资源入库 ---- */
   _processStorage(gain);
 
-  /* ---- 幸福演变 + 夜袭 ---- */
+  /* ---- ⑭ 幸福演变 + 夜袭 ---- */
   _processHappinessAndRaid(pop, E, importantLines);
 
-  /* ---- 随机事件 ---- */
+  /* ---- ⑮ 随机事件 ---- */
   const evs = [];
   if(Math.random()<.28){
     const pool = [];
@@ -951,7 +1158,7 @@ function nextDay(){
     if(pool.length) evs.push(pick(pool));
   }
 
-  /* ---- 写日志 ---- */
+  /* ---- ⑯ 写日志 ---- */
   state.day++;
   addLog(`—— 第 ${state.day} 天 ——`, 'day');
 
