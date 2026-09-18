@@ -182,4 +182,56 @@ function bootstrap(){
   }, 500);
 }
 
-bootstrap();
+/* ★ 新增：防止 UI 初始化重复执行 */
+var _uiInitialized = false;
+var _sharedInitScheduled = false;
+
+function bootstrap(){
+  state = load();
+  if(!state){
+    state = defaultState();
+    const seeds = [
+      ['艾琳娜','人类','神秘使'],
+      ['格罗姆','骷髅','受契之人'],
+      ['缇娅','猪灵','炼金术士'],
+      ['布洛姆','人类','凡俗者'],
+      ['薇拉','猪灵','神秘使']
+    ];
+    seeds.forEach(([n,r,p])=>{
+      const adv = newAdventurer(n,r,p,rollBaseAttrs());
+      if(Math.random()<.6) adv.inventory.push(pick(PERSONAL_ITEMS));
+      state.adventurers.push(adv);
+    });
+    state.campName = pick(['翠','金','石','铁','木','水','火','风','雷','霜'])+'石营地';
+    state.campId = 'camp_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+    addLog(`🏕 你在主世界边缘建立了一处小小据点「${state.campName}」，冒险者们慕名而来。`, 'epic');
+    addLog('提示：巡逻有机会查获贪污并追回赃款；点击营地名称可改名。', '');
+    save();
+  }
+  if(!state.campName) state.campName = pick(['翠','金','石','铁','木','水','火','风','雷','霜'])+'石营地';
+  if(!state.campId) state.campId = 'camp_' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+
+  validateState();
+
+  // ★ 只在首次初始化 UI 结构（下拉框、属性输入等）
+  if(!_uiInitialized){
+    initModalSelects();
+    _uiInitialized = true;
+  }
+
+  bindEvents();  // 有 listenersBound 保护，只绑定一次
+  renderNow();
+
+  // ★ 共享注册表初始化只跑一次，避免重复 setTimeout
+  if(!_sharedInitScheduled){
+    _sharedInitScheduled = true;
+    setTimeout(async ()=>{
+      const id = await ensureRegistryId();
+      if (id){
+        console.log('[共享注册表] ID: ' + id);
+        await publishMyCamp(true);
+        updateNetTag();
+      }
+    }, 500);
+  }
+}
